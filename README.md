@@ -68,3 +68,31 @@ Implementasi cookie JWT dan refresh lock process-local hanya untuk tahap lokal/s
 - Auditor read-only.
 
 Tidak ada optimistic stage update. UI memuat ulang detail, history, list, dan summary setelah workflow berhasil atau response `409`/`502`.
+
+## Docker
+
+Image production menggunakan output standalone Next.js dan berjalan sebagai user non-root:
+
+```bash
+docker build -t pbjt-dashboard .
+docker run --rm -p 3000:3000 \
+  -e PBJT_API_BASE_URL=http://host.docker.internal:8080/v1/pajak-restoran/dashboard \
+  pbjt-dashboard
+```
+
+Health check tersedia pada `GET /api/health`.
+
+## CI/CD Haura
+
+Push ke branch `main` menjalankan quality gate, membangun image immutable ke GHCR, lalu melakukan deployment melalui Cloudflare Access SSH. Konfigurasi Compose dan script deployment berada di `deploy/haura`.
+
+GitHub Environment `haura` memerlukan secrets berikut:
+
+- `HAURA_SSH_HOST` — `ssh.intellinkpy.id`
+- `HAURA_SSH_USER` — user SSH server
+- `HAURA_SSH_PRIVATE_KEY` — private key khusus deployment
+- `HAURA_DEPLOY_DIR` — contoh `/home/haura/pbjt-dashboard`
+- `HAURA_GHCR_USER` dan `HAURA_GHCR_TOKEN` — akses pull package GHCR
+- `CF_ACCESS_CLIENT_ID` dan `CF_ACCESS_CLIENT_SECRET` — service token Cloudflare Access
+
+Variables opsional: `PBJT_API_BASE_URL` (default backend Lontara saat ini), `PBJT_DASHBOARD_PORT` (default `8091`), dan `PBJT_API_TIMEOUT_MS` (default `15000`). Port hanya dibuka pada loopback server agar publikasi domain tetap melalui reverse proxy/tunnel.

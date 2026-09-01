@@ -1,0 +1,204 @@
+name: Deploy Haura
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: pbjt-dashboard-haura
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+
+  build:
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/dashboard-pbjt" >> "$GITHUB_OUTPUT"
+      - name: Resolve immutable version
+        id: version
+        shell: bash
+        run: echo "value=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.name }}:${{ steps.version.outputs.value }}
+          cache-from: type=gha,scope=pbjt-dashboard
+          cache-to: type=gha,mode=max,scope=pbjt-dashboard
+          provenance: false
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: haura
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.version }}
+
+      - name: Validate deployment configuration
+        shell: bash
+        env:
+          HAURA_SSH_HOST: ${{ secrets.HAURA_SSH_HOST }}
+          HAURA_SSH_USER: ${{ secrets.HAURA_SSH_USER }}
+          HAURA_SSH_PRIVATE_KEY: ${{ secrets.HAURA_SSH_PRIVATE_KEY }}
+          HAURA_DEPLOY_DIR: ${{ secrets.HAURA_DEPLOY_DIR }}
+          HAURA_GHCR_USER: ${{ secrets.HAURA_GHCR_USER }}
+          HAURA_GHCR_TOKEN: ${{ secrets.HAURA_GHCR_TOKEN }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          missing=0
+          for name in HAURA_SSH_HOST HAURA_SSH_USER HAURA_SSH_PRIVATE_KEY HAURA_DEPLOY_DIR \
+            HAURA_GHCR_USER HAURA_GHCR_TOKEN CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing GitHub Environment secret: $name" >&2
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+
+      - name: Configure Cloudflare SSH tunnel
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.HAURA_SSH_PRIVATE_KEY }}
+          HOST: ${{ secrets.HAURA_SSH_HOST }}
+        run: |
+          test "$HOST" = "ssh.intellinkpy.id"
+          curl --fail --silent --show-error --location \
+            https://github.com/cloudflare/cloudflared/releases/download/2026.5.1/cloudflared-linux-amd64 \
+            --output /tmp/cloudflared
+          echo '3c6a5ba995a258dbe90f98e5fdb2c2620b7be72c3ca761614f6eb52aee252cea  /tmp/cloudflared' \
+            | sha256sum --check --strict
+          sudo install -m 755 /tmp/cloudflared /usr/local/bin/cloudflared
+
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/haura
+          chmod 600 ~/.ssh/haura
+          printf '%s\n' \
+            'ssh.intellinkpy.id ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEf3uPycB05e8FIaDMW/YfP/ISxFuUJ8JYAc2PuU/lYA' \
+            > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+          cat > ~/.ssh/cloudflared-proxy <<'EOF'
+          #!/usr/bin/env sh
+          set -eu
+          : "${CF_ACCESS_CLIENT_ID:?Cloudflare Access client ID is required}"
+          : "${CF_ACCESS_CLIENT_SECRET:?Cloudflare Access client secret is required}"
+          exec /usr/local/bin/cloudflared access ssh \
+            --hostname "$1" \
+            --service-token-id "$CF_ACCESS_CLIENT_ID" \
+            --service-token-secret "$CF_ACCESS_CLIENT_SECRET"
+          EOF
+          chmod 700 ~/.ssh/cloudflared-proxy
+
+          cat > ~/.ssh/config <<'EOF'
+          Host ssh.intellinkpy.id
+            ProxyCommand ~/.ssh/cloudflared-proxy %h
+            IdentityFile ~/.ssh/haura
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Upload deployment configuration
+        id: upload
+        shell: bash
+        env:
+          HOST: ${{ secrets.HAURA_SSH_HOST }}
+          USER: ${{ secrets.HAURA_SSH_USER }}
+          REMOTE_DIR: ${{ secrets.HAURA_DEPLOY_DIR }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          PBJT_API_BASE_URL: ${{ vars.PBJT_API_BASE_URL || 'https://api.makassarkota.xyz/v1/pajak-restoran/dashboard' }}
+          PBJT_API_TIMEOUT_MS: ${{ vars.PBJT_API_TIMEOUT_MS || '15000' }}
+          PBJT_DASHBOARD_PORT: ${{ vars.PBJT_DASHBOARD_PORT || '8091' }}
+        run: |
+          ssh "$USER@$HOST" "mkdir -p '$REMOTE_DIR'"
+          scp deploy/haura/compose.yml deploy/haura/deploy.sh deploy/haura/rollback.sh \
+            "$USER@$HOST:$REMOTE_DIR/"
+          runtime_env=$(mktemp)
+          chmod 600 "$runtime_env"
+          printf 'PBJT_API_BASE_URL=%s\nPBJT_API_TIMEOUT_MS=%s\nPBJT_DASHBOARD_PORT=%s\n' \
+            "$PBJT_API_BASE_URL" "$PBJT_API_TIMEOUT_MS" "$PBJT_DASHBOARD_PORT" > "$runtime_env"
+          scp "$runtime_env" "$USER@$HOST:$REMOTE_DIR/.env"
+          ssh "$USER@$HOST" \
+            "chmod 600 '$REMOTE_DIR/.env' && chmod 700 '$REMOTE_DIR/deploy.sh' '$REMOTE_DIR/rollback.sh'"
+
+      - name: Deploy immutable image
+        id: deploy
+        shell: bash
+        env:
+          HOST: ${{ secrets.HAURA_SSH_HOST }}
+          USER: ${{ secrets.HAURA_SSH_USER }}
+          REMOTE_DIR: ${{ secrets.HAURA_DEPLOY_DIR }}
+          GHCR_USER: ${{ secrets.HAURA_GHCR_USER }}
+          GHCR_TOKEN: ${{ secrets.HAURA_GHCR_TOKEN }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          IMAGE: ${{ needs.build.outputs.image }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | ssh "$USER@$HOST" \
+            "docker login ghcr.io -u '$GHCR_USER' --password-stdin >/dev/null"
+          ssh "$USER@$HOST" "cd '$REMOTE_DIR' && ./deploy.sh '$IMAGE' '$VERSION'"
+
+      - name: Verify container health
+        id: verify
+        shell: bash
+        env:
+          HOST: ${{ secrets.HAURA_SSH_HOST }}
+          USER: ${{ secrets.HAURA_SSH_USER }}
+          REMOTE_DIR: ${{ secrets.HAURA_DEPLOY_DIR }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          ssh "$USER@$HOST" \
+            "cd '$REMOTE_DIR' && set -a && . ./.env && curl --fail --silent --show-error 'http://127.0.0.1:'\"\${PBJT_DASHBOARD_PORT}\"'/api/health'"
+
+      - name: Roll back after failed deployment
+        if: ${{ always() && steps.upload.outcome == 'success' && (steps.deploy.outcome == 'failure' || steps.verify.outcome == 'failure') }}
+        shell: bash
+        env:
+          HOST: ${{ secrets.HAURA_SSH_HOST }}
+          USER: ${{ secrets.HAURA_SSH_USER }}
+          REMOTE_DIR: ${{ secrets.HAURA_DEPLOY_DIR }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: ssh "$USER@$HOST" "cd '$REMOTE_DIR' && ./rollback.sh"
