@@ -1,36 +1,70 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Dashboard PBJT Bapenda
 
-## Getting Started
+Frontend operasional PBJT untuk Verifier, Kepala Bidang, Auditor, dan Super Admin. Dibangun dengan Next.js App Router. Browser hanya mengakses BFF same-origin `/api/*`; tidak ada akses langsung ke PostgreSQL atau SIMPAKDU.
 
-First, run the development server:
+## Kebutuhan
+
+- Node.js 20.9+
+- npm
+- Backend Lontara PBJT lokal/staging dengan `PBJT_ENABLED=true`
+- SIMPAKDU staging/mock untuk pengujian workflow tulis
+
+Jangan arahkan pengujian mutasi ke SIMPAKDU production.
+
+## Konfigurasi
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.example .env.local
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+```env
+PBJT_API_BASE_URL=http://localhost:8080/v1/pajak-restoran/dashboard
+PBJT_API_TIMEOUT_MS=15000
+```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+`PBJT_API_BASE_URL` bersifat server-only. Jangan memakai prefix `NEXT_PUBLIC_` atau menyimpan kredensial/token di environment frontend.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Menjalankan lokal
 
-## Learn More
+```bash
+npm install
+npm run dev
+```
 
-To learn more about Next.js, take a look at the following resources:
+Buka `http://localhost:3000`.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Verifikasi
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+npm run lint
+npm run typecheck
+npm run test
+npm run build
+```
 
-## Deploy on Vercel
+## Route aplikasi
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- `/login` — autentikasi petugas PBJT
+- `/dashboard` — ringkasan antrean
+- `/sptpd` — filter, list, dan detail SPTPD
+- `/staff` — manajemen petugas; Super Admin saja
+- `/profile` — profil dan perubahan password
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Model keamanan
+
+- Access/refresh JWT disimpan dalam cookie `HttpOnly`, `SameSite=Lax`; `Secure` pada production.
+- BFF melakukan refresh satu kali setelah upstream `401`.
+- Mutation BFF memakai method/path allowlist, validasi origin, JSON, ukuran body, dan schema Zod.
+- Browser tidak menerima token dari response login/session.
+- Backend tetap sumber otorisasi role dan workflow final.
+
+Implementasi cookie JWT dan refresh lock process-local hanya untuk tahap lokal/single-instance. Sebelum deployment multi-replica: gunakan opaque browser session, Redis/shared token store, distributed refresh lock, dan rotasi sesi terkoordinasi.
+
+## Workflow
+
+- Restoran: Verifier approve/revisi, Kepala Bidang approve/revisi. Approval Kepala Bidang memulai finalisasi SIMPAKDU.
+- Hotel: submit mobile berjalan langsung ke finalisasi backend; dashboard hanya memonitor tahap aktual.
+- Retry tersedia untuk Kepala Bidang/Super Admin saat `SYNC_FAILED`.
+- Auditor read-only.
+
+Tidak ada optimistic stage update. UI memuat ulang detail, history, list, dan summary setelah workflow berhasil atau response `409`/`502`.
