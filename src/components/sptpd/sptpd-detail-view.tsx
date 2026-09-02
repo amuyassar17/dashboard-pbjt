@@ -47,7 +47,7 @@ export function SptpdDetailView({ id }: { id: string }) {
       </aside>
     </main>
     {actions.length > 0 && <section className="action-bar verification-actions compact" id="verification-panel"><div><strong>{actions.includes("kabid-approve") ? "Keputusan Kepala Bidang" : "Pemeriksaan awal"}</strong><p>{actions.includes("kabid-approve") ? "Setujui untuk menerbitkan SPTPD dan ID billing melalui SIMPAKDU." : "Teruskan laporan yang sesuai atau kembalikan dengan catatan revisi."}</p></div><div>{actions.map((action) => <WorkflowDialog key={action} action={action} sptpdId={id} identity={identity} />)}</div></section>}
-    {actions.length === 0 && (item.noVa || item.simpakduSyncStatus !== "NOT_STARTED") && <section className="settlement-inline"><span>SIMPAKDU <strong>{item.simpakduSyncStatus.replaceAll("_", " ")}</strong></span><span>ID billing <strong>{item.noVa ?? "Belum tersedia"}</strong></span><span>Total <strong>{rupiah.format(item.totalTagihan)}</strong></span></section>}
+    {actions.length === 0 && item.noVa && <section className="settlement-inline"><span>ID billing <strong>{item.noVa}</strong></span><span>Total <strong>{rupiah.format(item.totalTagihan)}</strong></span></section>}
   </>;
 }
 
