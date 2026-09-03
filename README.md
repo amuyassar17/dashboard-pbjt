@@ -18,7 +18,7 @@ cp .env.example .env.local
 ```
 
 ```env
-PBJT_API_BASE_URL=http://localhost:8080/v1/pajak-restoran/dashboard
+PBJT_API_BASE_URL=http://localhost:8080/v1/pbjt/dashboard
 PBJT_API_TIMEOUT_MS=15000
 ```
 
@@ -76,7 +76,7 @@ Image production menggunakan output standalone Next.js dan berjalan sebagai user
 ```bash
 docker build -t pbjt-dashboard .
 docker run --rm -p 3000:3000 \
-  -e PBJT_API_BASE_URL=http://host.docker.internal:8080/v1/pajak-restoran/dashboard \
+  -e PBJT_API_BASE_URL=http://host.docker.internal:8080/v1/pbjt/dashboard \
   pbjt-dashboard
 ```
 
